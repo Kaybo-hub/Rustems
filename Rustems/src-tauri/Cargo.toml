@@ -25,6 +25,7 @@ serde_json = "1"
 kira = { version = "0.12", features = ["wav", "mp3", "flac"] }
 thiserror = "1.0"
 tokio = { version = "1", features = ["time"] }
+tauri-plugin-dialog = "2.6.0"
 
 [profile.dev.package.kira]
 opt-level = 3
@@ -45,9 +46,6 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.symphonia-bundle-flac]
-opt-level = 3
-
-[profile.dev.package.symphonia-format-wav]
 opt-level = 3
 
 [profile.dev.package.symphonia-codec-pcm]

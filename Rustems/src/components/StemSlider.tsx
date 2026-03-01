@@ -1,5 +1,7 @@
 import { useState } from "react"
 import { useStemPlayer } from "../hooks/useStemPlayer"
+import { open } from "@tauri-apps/plugin-dialog";
+
 
 interface Props {
   stem: string
@@ -29,4 +31,15 @@ export default function StemSlider({ stem }: Props) {
       <span>{stem.toUpperCase()}</span>
     </div>
   )
+}
+
+export async function pickFolder(): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: "Select Stem Folder",
+  });
+
+  if (!selected) return null;
+  return Array.isArray(selected) ? selected[0] : selected;
 }
