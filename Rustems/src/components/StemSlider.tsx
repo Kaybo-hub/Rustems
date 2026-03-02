@@ -2,19 +2,25 @@ import { useState } from "react"
 import { useStemPlayer } from "../hooks/useStemPlayer"
 import { open } from "@tauri-apps/plugin-dialog";
 
-
 interface Props {
-  stem: string
+  stem: string;
+  onValueChange?: (value: number) => void; 
 }
 
-export default function StemSlider({ stem }: Props) {
+export default function StemSlider({ stem, onValueChange }: Props) {
   const { setStemVolume } = useStemPlayer()
   const [volume, setVolume] = useState(1)
 
   const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = parseFloat(e.target.value)
     setVolume(value)
+    
     await setStemVolume(stem, value)
+
+    if (onValueChange) {
+      // Map 0.0-1.0 to 0-255 for the hardware LEDs
+      onValueChange(Math.round(value * 255));
+    }
   }
 
   return (
@@ -26,9 +32,17 @@ export default function StemSlider({ stem }: Props) {
         step="0.01"
         value={volume}
         onChange={handleChange}
-        style={{ writingMode: "vertical-lr", transform: "rotate(180deg)", height: "150px" }}
+        style={{ 
+          writingMode: "vertical-lr", 
+          direction: "rtl",
+          verticalAlign: "middle",
+          height: "150px",
+          cursor: "pointer",
+        }}
       />
-      <span>{stem.toUpperCase()}</span>
+      <span style={{ marginTop: "10px", fontSize: "12px", fontWeight: "bold" }}>
+        {stem.toUpperCase()}
+      </span>
     </div>
   )
 }

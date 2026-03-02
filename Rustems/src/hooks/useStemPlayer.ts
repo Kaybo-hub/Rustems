@@ -38,7 +38,6 @@ export function useStemPlayer() {
     }
   }
 
-
   return {
     loadSong,
     play,
@@ -46,4 +45,8 @@ export function useStemPlayer() {
     setStemVolume,
     printStatus
   }
+}
+
+export async function getUSBDevices() {
+  return await invoke<string[]>("list_usb_devices");
 }
