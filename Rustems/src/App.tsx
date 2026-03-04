@@ -3,33 +3,18 @@ import { useStemPlayer } from "./hooks/useStemPlayer"
 import { useEffect, useState } from "react"
 import { pickFolder } from "./components/StemSlider"
 import { invoke } from "@tauri-apps/api/core"
-import { useThrottle } from "./hooks/useThrottle"
+import { message } from "@tauri-apps/plugin-dialog"
 
 export default function App() {
   const { loadSong, play, pause } = useStemPlayer()
   const [folder, setFolder] = useState<string | null>(null)
   const [devices, setDevices] = useState<string[]>([])
   const [selectedDevice, setSelectedDevice] = useState("")
-  const [vibe, setVibe] = useState({ r: 255, g: 255, b: 255 });
+  const [uploading, setUploading] = useState(false)
 
   useEffect(() => {
     invoke<string[]>("list_usb_devices").then(setDevices)
   }, [])
-
-  const throttledLedUpdate = useThrottle((r: number, g: number, b: number) => {
-    if (selectedDevice) {
-      invoke("set_led_color", {
-        serial: selectedDevice,
-        red: r,
-        green: g,
-        blue: b
-      }).catch(console.error);
-    }
-  }, 50);
-
-  useEffect(() => {
-    throttledLedUpdate(vibe.r, vibe.g, vibe.b);
-  }, [vibe, throttledLedUpdate])
 
   const handlePickAndLoad = async () => {
     const selectedFolder = await pickFolder()
@@ -44,7 +29,23 @@ export default function App() {
     try {
       await invoke<string>("connect_usb_device", { serial: selectedDevice })
     } catch (err) {
-      console.error("Failed to connect:", err)
+      await message(`Failed to connect: ${err}`, { title: "Error", kind: "error" })
+    }
+  }
+
+  const handleUpload = async () => {
+    if (!folder) {
+      await message("Load a folder first", { title: "Rustems", kind: "warning" })
+      return
+    }
+    setUploading(true)
+    try {
+      await invoke("upload_stems", { folder })
+      await message("Upload complete!", { title: "Rustems", kind: "info" })
+    } catch (err) {
+      await message(`Upload failed: ${err}`, { title: "Error", kind: "error" })
+    } finally {
+      setUploading(false)
     }
   }
 
@@ -67,6 +68,13 @@ export default function App() {
         <button onClick={pause}>Pause</button>
       </div>
 
+      <button onClick={async () => {
+          const result = await invoke<string>("check_device_state")
+          await message(result, { title: "Device State" })
+      }}>
+          Check State
+      </button>
+
       <div style={{ marginTop: 20 }}>
         <label>Select USB Device:</label>
         <select
@@ -83,23 +91,17 @@ export default function App() {
         <button onClick={handleConnect}>Connect</button>
       </div>
 
-      <div style={{ display: "flex", gap: 40, marginTop: 40 }}>
-        <StemSlider
-          stem="drums"
-          onValueChange={(val) => setVibe(prev => ({...prev, r: val}))}
-        />
-        <StemSlider
-          stem="bass"
-          onValueChange={(val) => setVibe(prev => ({...prev, g: val}))}
-        />
-        <StemSlider
-          stem="melody"
-          onValueChange={(val) => setVibe(prev => ({...prev, b: val}))}
-        />
-        <StemSlider
-          stem="vocals"
-          onValueChange={(val) => setVibe({r: val, g: val, b: val})}
-        />
+      <button onClick={handleUpload} disabled={!folder || !selectedDevice}>
+        Upload to Device
+      </button>
+
+      {uploading && <p style={{ color: "orange" }}>Uploading stems, please wait...</p>}
+
+      <div style={{ display: "flex", gap: 40, marginTop: 40, opacity: uploading ? 0.5 : 1, pointerEvents: uploading ? "none" : "auto" }}>
+        <StemSlider stem="drums" />
+        <StemSlider stem="bass" />
+        <StemSlider stem="melody" />
+        <StemSlider stem="vocals" />
       </div>
     </div>
   )

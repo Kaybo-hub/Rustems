@@ -23,7 +23,8 @@ pub fn run() {
             cmd::print_audio_status,
             stem_player::list_usb_devices,
             stem_player::connect_usb_device,
-            stem_player::set_led_color,
+            stem_player::upload_stems,
+            stem_player::check_device_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
