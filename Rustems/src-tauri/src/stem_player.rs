@@ -354,13 +354,6 @@ fn do_upload(
     let sync_timeout  = Duration::from_secs(10);
     let audio_timeout = Duration::from_secs(120);
 
-    let proddata = fs::read(find_device_drive()?)
-        .map_err(|e| format!("Failed to read PRODDATA.DAT: {}", e))?;
-    if proddata.len() < 8 { return Err("PRODDATA.DAT too small".to_string()); }
-    let album_id = format!("A{}", u32::from_le_bytes([proddata[0], proddata[1], proddata[2], proddata[3]]) + 1);
-    let track_id = format!("T{}", u32::from_le_bytes([proddata[4], proddata[5], proddata[6], proddata[7]]) + 1);
-    eprintln!("[upload] New album: {}, track: {}", album_id, track_id);
-
     // ── Pass 1: sync until RECORD, then re-ping ───────────────────────────────
     eprintln!("[upload] Pass 1: initial sync...");
     let listing_pkt = do_ping(&handle, ep_out, ep_in, sync_timeout)?;
@@ -374,7 +367,37 @@ fn do_upload(
     // ── Pass 2: full sync including RECORD/T1, then final ping ────────────────
     eprintln!("[upload] Pass 2: full sync...");
     let pass2_result = sync_pass(&handle, ep_out, ep_in, sync_timeout, &listing2, true)?;
-    let _listing3_pkt = pass2_result.ok_or("Pass 2: RECORD album not found in listing")?;
+    let listing3_pkt = pass2_result.ok_or("Pass 2: RECORD album not found in listing")?;
+
+    let listing3 = parse_track_listing(&listing3_pkt);
+
+    let mut max_album_num = 0u32;
+    let mut max_track_num = 0u32;
+
+    for (album, tracks) in &listing3 {
+        if let Some(num) = album.strip_prefix('A')
+            .and_then(|s| s.parse::<u32>().ok()) {
+            max_album_num = max_album_num.max(num);
+        }
+
+        for track in tracks {
+            if let Some(num) = track.strip_prefix('T')
+                .and_then(|s| s.parse::<u32>().ok()) {
+                max_track_num = max_track_num.max(num);
+            }
+        }
+    }
+
+    if max_album_num == 0 {
+        return Err("No valid albums found on device".into());
+    }
+
+    // Append to the highest existing album
+    // and increment track globally.
+    let album_id = format!("A{}", max_album_num);
+    let track_id = format!("T{}", max_track_num + 1);
+
+    eprintln!("[upload] Allocated album: {}, track: {}", album_id, track_id);
 
     // Device is now primed — upload begins immediately after the final ping.
 
