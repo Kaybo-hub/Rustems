@@ -29,6 +29,7 @@ tauri-plugin-dialog = "2.6.0"
 rusb = "0.9.4"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["clock"] }
+rand = "0.10.0"
 
 
 [profile.dev.package.kira]

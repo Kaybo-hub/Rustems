@@ -3,6 +3,7 @@ use std::time::Duration;
 use std::sync::Mutex;
 use std::fs;
 use tokio::task;
+use rand::RngExt;
 
 // ── Command bytes (all verified against Wireshark capture) ───────────────────
 
@@ -418,8 +419,11 @@ fn do_upload(
 
     // ── Upload track-config ───────────────────────────────────────────────────
     eprintln!("[upload] Uploading track-config...");
+
+    let (colour1, colour2) = random_colour_pair();
+
     let mut track_body = serde_json::to_vec(&serde_json::json!({
-        "TrackColour": ["#B3BD2A", "#212961"],
+        "TrackColour": [colour1, colour2],
         "tempos": [{ "tempo_bpm": 120, "time_ms": 0 }],
         "TrackGain_dB": 0,
         "metadata": {
@@ -462,6 +466,41 @@ fn find_device_drive() -> Result<std::path::PathBuf, String> {
         }
         Err("Stem Player drive not found (PRODDATA.DAT missing under /media or /Volumes)".to_string())
     }
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s; // chroma
+    let h_ = h / 60.0;
+    let x = c * (1.0 - (h_ % 2.0 - 1.0).abs());
+
+    let (r1, g1, b1) = match h_ as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    let m = l - c / 2.0;
+    (
+        ((r1 + m) * 255.0).round() as u8,
+        ((g1 + m) * 255.0).round() as u8,
+        ((b1 + m) * 255.0).round() as u8,
+    )
+}
+
+fn random_colour_pair() -> (String, String) {
+    let mut rng = rand::rng();
+    let h1 = rng.random_range(0.0..360.0_f32);
+    let h2 = (h1 + 150.0) % 360.0;
+
+    let s = rng.random_range(0.6..1.0_f32);
+    let l = rng.random_range(0.45..0.65_f32);
+
+    let c1 = {let (r,g,b) = hsl_to_rgb(h1, s, l); format!("#{:02X}{:02X}{:02X}", r, g, b)};
+    let c2 = {let (r,g,b) = hsl_to_rgb(h2, s, l); format!("#{:02X}{:02X}{:02X}", r, g, b)};
+    (c1, c2)
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
