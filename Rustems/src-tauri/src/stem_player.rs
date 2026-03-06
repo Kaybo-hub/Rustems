@@ -4,21 +4,46 @@ use std::sync::Mutex;
 use std::fs;
 use tokio::task;
 use rand::RngExt;
+use serde::{Deserialize, Serialize};
+use tauri::State;
 
 // ── Command bytes (all verified against Wireshark capture) ───────────────────
 
+// Message types (outer frame byte, verified against emulator source)
+const MSG_CONNECT: u8        = 0x02;
+const MSG_DISCONNECT: u8     = 0x03; // standalone disconnect frame — no payload
 const MSG_CONTROL: u8        = 0x04;
-const CTRL_PING: u8          = 0x03;
-const CTRL_REQUEST_ALBUM: u8 = 0x05;
-const CTRL_REQUEST_TRACK: u8 = 0x06;
-
 const MSG_FILE_HEADER: u8    = 0x06;
 const MSG_FILE_BODY: u8      = 0x07;
+
+// Control subtypes (payload[0] inside a MSG_CONTROL frame)
+const CTRL_PING: u8          = 0x03; // GET_TRACKS_INFO
+const CTRL_REQUEST_ALBUM: u8 = 0x05; // GET_ALBUM_CONFIG
+const CTRL_REQUEST_TRACK: u8 = 0x06; // GET_TRACK_CONFIG
+const CTRL_DELETE_ALBUM: u8  = 0x09; // DELETE_ALBUM
+const CTRL_DELETE_TRACK: u8  = 0x0A; // DELETE_TRACK
 
 const RECORD_ALBUM: &str     = "RECORD";
 const CHUNK_SIZE: usize      = 8192;
 
 pub struct DeviceState(pub Mutex<Option<rusb::DeviceHandle<rusb::Context>>>);
+
+// ── Public data types returned to the frontend ────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TrackInfo {
+    pub album_id: String,
+    pub track_id: String,
+    pub title: String,
+    pub artist: String,
+    pub colours: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AlbumInfo {
+    pub album_id: String,
+    pub tracks: Vec<TrackInfo>,
+}
 
 // ── Packet framing ────────────────────────────────────────────────────────────
 //
@@ -183,6 +208,27 @@ fn parse_track_listing(pkt: &[u8]) -> Vec<(String, Vec<String>)> {
             .iter().filter_map(|t| t["t"].as_str().map(|s| s.to_string())).collect();
         Some((album, tracks))
     }).collect()
+}
+
+/// Parse a track-config JSON blob into a TrackInfo.
+/// Falls back to placeholder strings if fields are missing.
+fn parse_track_config(album_id: &str, track_id: &str, raw: &[u8]) -> TrackInfo {
+    // Strip trailing null byte if present
+    let json_bytes = if raw.last() == Some(&0x00) { &raw[..raw.len()-1] } else { raw };
+
+    let (title, artist, colours) = match serde_json::from_slice::<serde_json::Value>(json_bytes) {
+        Ok(v) => {
+            let title  = v["metadata"]["title"].as_str().unwrap_or(track_id).to_string();
+            let artist = v["metadata"]["artist"].as_str().unwrap_or("Unknown").to_string();
+            let colours = v["TrackColour"].as_array()
+                .map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_else(|| vec!["#ffffff".to_string(), "#ffffff".to_string()]);
+            (title, artist, colours)
+        }
+        Err(_) => (track_id.to_string(), "Unknown".to_string(), vec!["#ffffff".to_string(), "#ffffff".to_string()]),
+    };
+
+    TrackInfo { album_id: album_id.to_string(), track_id: track_id.to_string(), title, artist, colours }
 }
 
 fn do_ping(
@@ -393,8 +439,7 @@ fn do_upload(
         return Err("No valid albums found on device".into());
     }
 
-    // Append to the highest existing album
-    // and increment track globally.
+    // Append to the highest existing album and increment track globally.
     let album_id = format!("A{}", max_album_num);
     let track_id = format!("T{}", max_track_num + 1);
 
@@ -443,33 +488,80 @@ fn do_upload(
     Ok(())
 }
 
-// ── Drive discovery ───────────────────────────────────────────────────────────
+// ── Fetch all albums and track metadata from the device ──────────────────────
+//
+// This does a lightweight read: for each real album (skipping RECORD), it
+// reads the track-config of every track to extract the human-readable title.
+// It does NOT read stem audio data.
 
-fn find_device_drive() -> Result<std::path::PathBuf, String> {
-    #[cfg(target_os = "windows")]
-    {
-        for letter in b'D'..=b'Z' {
-            let path = std::path::PathBuf::from(format!("{}:/PRODDATA.DAT", letter as char));
-            if path.exists() { return Ok(path); }
+fn do_list_tracks(
+    handle: &rusb::DeviceHandle<rusb::Context>,
+    ep_out: u8,
+    ep_in: u8,
+) -> Result<Vec<AlbumInfo>, String> {
+    let timeout = Duration::from_secs(10);
+
+    let listing_pkt = do_ping(handle, ep_out, ep_in, timeout)?;
+    let listing = parse_track_listing(&listing_pkt);
+
+    let mut albums: Vec<AlbumInfo> = Vec::new();
+
+    for (album_id, track_ids) in &listing {
+        if album_id == RECORD_ALBUM { continue; }
+
+        // Read album-config (required by protocol, contents discarded)
+        read_device_file(handle, ep_out, ep_in,
+            build_message(MSG_CONTROL, &{
+                let json = format!("{{\"album\":\"{}\"}}", album_id);
+                let mut p = vec![CTRL_REQUEST_ALBUM];
+                p.extend_from_slice(json.as_bytes()); p.push(0x00); p
+            }), timeout)?;
+
+        let mut tracks: Vec<TrackInfo> = Vec::new();
+
+        for track_id in track_ids {
+            let raw = read_device_file(handle, ep_out, ep_in,
+                build_message(MSG_CONTROL, &{
+                    let json = format!("{{\"album\":\"{}\",\"track\":\"{}\"}}", album_id, track_id);
+                    let mut p = vec![CTRL_REQUEST_TRACK];
+                    p.extend_from_slice(json.as_bytes()); p.push(0x00); p
+                }), timeout)?;
+
+            tracks.push(parse_track_config(album_id, track_id, &raw));
         }
-        Err("Stem Player drive not found (PRODDATA.DAT missing D–Z)".to_string())
+
+        albums.push(AlbumInfo { album_id: album_id.clone(), tracks });
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        for base in &["/media", "/Volumes"] {
-            if let Ok(entries) = fs::read_dir(base) {
-                for entry in entries.flatten() {
-                    let path = entry.path().join("PRODDATA.DAT");
-                    if path.exists() { return Ok(path); }
-                }
-            }
-        }
-        Err("Stem Player drive not found (PRODDATA.DAT missing under /media or /Volumes)".to_string())
-    }
+
+    Ok(albums)
 }
 
+// ── Delete protocol ───────────────────────────────────────────────────────────
+//
+// DELETE_ALBUM = control subtype 0x09  {"album":"A1"}
+// DELETE_TRACK = control subtype 0x0A  {"album":"A1","track":"T3"}
+// Both follow the standard MSG_CONTROL framing and return an ACK.
+
+fn do_delete(
+    handle: &rusb::DeviceHandle<rusb::Context>,
+    ep_out: u8,
+    ep_in: u8,
+    ctrl_byte: u8,
+    json: &str,
+) -> Result<(), String> {
+    let timeout = Duration::from_secs(10);
+    let mut payload = vec![ctrl_byte];
+    payload.extend_from_slice(json.as_bytes());
+    payload.push(0x00);
+    handle.write_bulk(ep_out, &build_message(MSG_CONTROL, &payload), timeout)
+        .map_err(|e| format!("DELETE write failed: {}", e))?;
+    expect_ack(handle, ep_in, timeout, "delete")
+}
+
+
+
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s; // chroma
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let h_ = h / 60.0;
     let x = c * (1.0 - (h_ % 2.0 - 1.0).abs());
 
@@ -498,8 +590,8 @@ fn random_colour_pair() -> (String, String) {
     let s = rng.random_range(0.6..1.0_f32);
     let l = rng.random_range(0.45..0.65_f32);
 
-    let c1 = {let (r,g,b) = hsl_to_rgb(h1, s, l); format!("#{:02X}{:02X}{:02X}", r, g, b)};
-    let c2 = {let (r,g,b) = hsl_to_rgb(h2, s, l); format!("#{:02X}{:02X}{:02X}", r, g, b)};
+    let c1 = { let (r,g,b) = hsl_to_rgb(h1, s, l); format!("#{:02X}{:02X}{:02X}", r, g, b) };
+    let c2 = { let (r,g,b) = hsl_to_rgb(h2, s, l); format!("#{:02X}{:02X}{:02X}", r, g, b) };
     (c1, c2)
 }
 
@@ -552,7 +644,7 @@ pub fn connect_usb_device(
     drain_stale(&handle, ep_in);
 
     // ── Handshake ─────────────────────────────────────────────────────────────
-    handle.write_bulk(ep_out, &build_message(0x02, &[]), timeout)
+    handle.write_bulk(ep_out, &build_message(MSG_CONNECT, &[]), timeout)
         .map_err(|e| format!("CONNECT write failed: {}", e))?;
     read_response(&handle, ep_in, timeout)?;
 
@@ -564,9 +656,6 @@ pub fn connect_usb_device(
         .map_err(|e| format!("handshake ACK failed: {}", e))?;
 
     // ── Initial sync (connect-time) ───────────────────────────────────────────
-    // Just read the track listing so we know what's on device.
-    // If device is stuck in upload mode from a prior failed session, the ping
-    // will return [02 00 01 03] instead of a listing. Drain and retry.
     eprintln!("[connect] Initial ping...");
     let mut listing_pkt = None;
     for attempt in 0..5 {
@@ -594,11 +683,18 @@ pub fn connect_usb_device(
 #[tauri::command]
 pub async fn upload_stems(
     folder: String,
+    track_name: String,
     state: tauri::State<'_, DeviceState>,
 ) -> Result<(), String> {
     let folder_path = std::path::Path::new(&folder);
-    let track_name  = folder_path.file_name()
-        .and_then(|n| n.to_str()).unwrap_or("track").to_string();
+
+    // Use provided track_name; fall back to folder name if blank
+    let resolved_name = if track_name.trim().is_empty() {
+        folder_path.file_name()
+            .and_then(|n| n.to_str()).unwrap_or("track").to_string()
+    } else {
+        track_name.trim().to_string()
+    };
 
     let mut stem_data: Vec<(usize, Vec<u8>)> = Vec::new();
     for (i, name) in ["melody", "vocals", "bass", "drums"].iter().enumerate() {
@@ -613,15 +709,61 @@ pub async fn upload_stems(
         .take()
         .ok_or("Device not connected")?;
 
-    task::spawn_blocking(move || do_upload(handle, 0x01, 0x81, track_name, stem_data))
+    task::spawn_blocking(move || do_upload(handle, 0x01, 0x81, resolved_name, stem_data))
         .await
         .map_err(|e| format!("Upload task panicked: {}", e))?
 }
 
+/// Returns all albums and their tracks with human-readable titles read from
+/// each track's config. Requires the device to be connected.
 #[tauri::command]
-pub fn check_device_state(state: tauri::State<'_, DeviceState>) -> String {
-    match state.0.try_lock() {
-        Ok(g)  => if g.is_some() { "Connected".into() } else { "Not connected".into() },
-        Err(_) => "DEADLOCK: mutex locked".into(),
+pub fn list_device_tracks(
+    state: tauri::State<'_, DeviceState>,
+) -> Result<Vec<AlbumInfo>, String> {
+    let guard = state.0.lock().map_err(|_| "Mutex poisoned".to_string())?;
+    let handle = guard.as_ref().ok_or("Device not connected")?;
+    do_list_tracks(handle, 0x01, 0x81)
+}
+
+/// Delete a single track from the device.
+#[tauri::command]
+pub fn delete_track(
+    album_id: String,
+    track_id: String,
+    state: tauri::State<'_, DeviceState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|_| "Mutex poisoned".to_string())?;
+    let handle = guard.as_ref().ok_or("Device not connected")?;
+    let json = format!("{{\"album\":\"{}\",\"track\":\"{}\"}}", album_id, track_id);
+    do_delete(handle, 0x01, 0x81, CTRL_DELETE_TRACK, &json)
+}
+
+/// Delete an entire album and all its tracks from the device.
+#[tauri::command]
+pub fn delete_album(
+    album_id: String,
+    state: tauri::State<'_, DeviceState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|_| "Mutex poisoned".to_string())?;
+    let handle = guard.as_ref().ok_or("Device not connected")?;
+    let json = format!("{{\"album\":\"{}\"}}", album_id);
+    do_delete(handle, 0x01, 0x81, CTRL_DELETE_ALBUM, &json)
+}
+
+#[tauri::command]
+pub fn disconnect_device(state: State<DeviceState>) -> Result<(), String> {
+    let mut guard = state.0.lock().unwrap();
+    if let Some(handle) = guard.take() {
+        do_disconnect(handle);
     }
+    Ok(())
+}
+
+pub fn do_disconnect(handle: rusb::DeviceHandle<rusb::Context>) {
+    let timeout = Duration::from_millis(500);
+    let msg = build_message(MSG_DISCONNECT, &[]);
+    let _ = handle.write_bulk(0x01, &msg, timeout);
+    drain_stale(&handle, 0x81);
+    let _ = handle.release_interface(0);
+    drop(handle);
 }

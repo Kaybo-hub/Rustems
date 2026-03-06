@@ -8,6 +8,7 @@ mod stem_player;
 use audio::StemEngine;
 use stem_player::DeviceState;
 use std::sync::Mutex;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -24,8 +25,23 @@ pub fn run() {
             stem_player::list_usb_devices,
             stem_player::connect_usb_device,
             stem_player::upload_stems,
-            stem_player::check_device_state
+            stem_player::list_device_tracks,
+            stem_player::delete_track,
+            stem_player::delete_album,
+            stem_player::disconnect_device,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            match event {
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                    let state = app_handle.state::<DeviceState>();
+                    let mut guard = state.0.lock().unwrap();
+                    if let Some(handle) = guard.take() {
+                        crate::stem_player::do_disconnect(handle);
+                    }
+                }
+                _ => {}
+            }
+        });
 }
