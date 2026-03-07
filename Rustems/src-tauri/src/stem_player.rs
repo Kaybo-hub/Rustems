@@ -553,12 +553,18 @@ fn do_delete(
     let mut payload = vec![ctrl_byte];
     payload.extend_from_slice(json.as_bytes());
     payload.push(0x00);
+
     handle.write_bulk(ep_out, &build_message(MSG_CONTROL, &payload), timeout)
         .map_err(|e| format!("DELETE write failed: {}", e))?;
-    expect_ack(handle, ep_in, timeout, "delete")
+
+    // Device responds with STATUS [02 00 05 <ctrl_byte>]
+    let resp = read_response(handle, ep_in, timeout)?;
+    if resp.len() >= 4 && resp[2] == 0x05 && resp[3] == ctrl_byte {
+        Ok(())
+    } else {
+        Err(format!("Unexpected delete response: {:02x?}", &resp[..resp.len().min(8)]))
+    }
 }
-
-
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
