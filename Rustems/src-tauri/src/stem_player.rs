@@ -45,6 +45,13 @@ pub struct AlbumInfo {
     pub tracks: Vec<TrackInfo>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StorageInfo {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
+}
+
 // ── Packet framing ────────────────────────────────────────────────────────────
 //
 // All packets: [total_len : u16 LE] [cmd : u8] [payload...]
@@ -447,6 +454,20 @@ fn do_upload(
 
     // Device is now primed — upload begins immediately after the final ping.
 
+    // ── Storage check ─────────────────────────────────────────────────────────
+    let storage = do_get_storage(&handle, ep_out, ep_in)?;
+    // Estimate required space: sum of all stem sizes + ~1 KB for track-config.
+    // Multiply by 1.1 as a safety margin for filesystem overhead.
+    let required_bytes = stem_data.iter().map(|(_, d)| d.len() as u64).sum::<u64>() + 1024;
+    let required_with_margin = (required_bytes as f64 * 1.1) as u64;
+    if required_with_margin > storage.free_bytes {
+        return Err(format!(
+            "Not enough storage: need ~{} MB, only {} MB free",
+            required_with_margin / 1_048_576,
+            storage.free_bytes / 1_048_576
+        ));
+    }
+
     // ── Upload stems ──────────────────────────────────────────────────────────
     for (stem_num, data) in &stem_data {
         eprintln!("[upload] Uploading stem {} ({} bytes)...", stem_num, data.len());
@@ -486,6 +507,40 @@ fn do_upload(
 
     eprintln!("[upload] Upload complete.");
     Ok(())
+}
+
+// ── Storage query ────────────────────────────────────────────────────────────
+//
+// CTRL/0x02 → {"size":"<total>","free":"<free>"}  (both values are byte counts as strings)
+
+fn do_get_storage(
+    handle: &rusb::DeviceHandle<rusb::Context>,
+    ep_out: u8,
+    ep_in: u8,
+) -> Result<StorageInfo, String> {
+    let timeout = Duration::from_secs(10);
+    handle.write_bulk(ep_out, &build_message(MSG_CONTROL, &[0x02]), timeout)
+        .map_err(|e| format!("storage query failed: {}", e))?;
+    let resp = read_response(handle, ep_in, timeout)?;
+
+    // Response: [02 00 05 02] + json payload
+    if resp.len() < 5 {
+        return Err(format!("storage response too short: {:02x?}", resp));
+    }
+    let total_len = resp[0] as usize + (resp[1] as usize) * 256;
+    let json_end  = (2 + total_len).min(resp.len());
+    let json_str  = std::str::from_utf8(&resp[4..json_end])
+        .map_err(|_| "storage response not UTF-8".to_string())?
+        .trim_end_matches('\0');
+
+    let v: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("storage JSON parse failed: {}", e))?;
+
+    let total = v["size"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+    let free  = v["free"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+    let used  = total.saturating_sub(free);
+
+    Ok(StorageInfo { total_bytes: total, free_bytes: free, used_bytes: used })
 }
 
 // ── Fetch all albums and track metadata from the device ──────────────────────
@@ -557,9 +612,9 @@ fn do_delete(
     handle.write_bulk(ep_out, &build_message(MSG_CONTROL, &payload), timeout)
         .map_err(|e| format!("DELETE write failed: {}", e))?;
 
-    // Device responds with STATUS [02 00 05 <ctrl_byte>]
+    // Device responds with MSG_CONTROL + ctrl_byte, not a plain ACK
     let resp = read_response(handle, ep_in, timeout)?;
-    if resp.len() >= 4 && resp[2] == 0x05 && resp[3] == ctrl_byte {
+    if resp.len() >= 3 && resp[2] == MSG_CONTROL && resp.get(3) == Some(&ctrl_byte) {
         Ok(())
     } else {
         Err(format!("Unexpected delete response: {:02x?}", &resp[..resp.len().min(8)]))
@@ -754,6 +809,16 @@ pub fn delete_album(
     let handle = guard.as_ref().ok_or("Device not connected")?;
     let json = format!("{{\"album\":\"{}\"}}", album_id);
     do_delete(handle, 0x01, 0x81, CTRL_DELETE_ALBUM, &json)
+}
+
+/// Query device storage (total, used, free bytes).
+#[tauri::command]
+pub fn get_storage_info(
+    state: tauri::State<'_, DeviceState>,
+) -> Result<StorageInfo, String> {
+    let guard = state.0.lock().map_err(|_| "Mutex poisoned".to_string())?;
+    let handle = guard.as_ref().ok_or("Device not connected")?;
+    do_get_storage(handle, 0x01, 0x81)
 }
 
 #[tauri::command]

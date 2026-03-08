@@ -29,6 +29,7 @@ pub fn run() {
             stem_player::delete_track,
             stem_player::delete_album,
             stem_player::disconnect_device,
+            stem_player::get_storage_info
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
