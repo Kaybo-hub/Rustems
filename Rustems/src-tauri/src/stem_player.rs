@@ -404,6 +404,17 @@ fn do_upload(
     ep_in: u8,
     track_name: String,
     stem_data: Vec<(usize, Vec<u8>)>,
+) -> (rusb::DeviceHandle<rusb::Context>, Result<(), String>) {
+    let result = do_upload_inner(&handle, ep_out, ep_in, track_name, stem_data);
+    (handle, result)
+}
+
+fn do_upload_inner(
+    handle: &rusb::DeviceHandle<rusb::Context>,
+    ep_out: u8,
+    ep_in: u8,
+    track_name: String,
+    stem_data: Vec<(usize, Vec<u8>)>,
 ) -> Result<(), String> {
     let sync_timeout  = Duration::from_secs(10);
     let audio_timeout = Duration::from_secs(120);
@@ -456,15 +467,14 @@ fn do_upload(
 
     // ── Storage check ─────────────────────────────────────────────────────────
     let storage = do_get_storage(&handle, ep_out, ep_in)?;
-    // Estimate required space: sum of all stem sizes + ~1 KB for track-config.
-    // Multiply by 1.1 as a safety margin for filesystem overhead.
-    let required_bytes = stem_data.iter().map(|(_, d)| d.len() as u64).sum::<u64>() + 1024;
-    let required_with_margin = (required_bytes as f64 * 1.1) as u64;
-    if required_with_margin > storage.free_bytes {
+    // stem sizes are in bytes; device free_bytes is in KB
+    let required_kb = (stem_data.iter().map(|(_, d)| d.len() as u64).sum::<u64>() + 1024) as f64
+        * 1.1 / 1024.0;
+    if required_kb as u64 > storage.free_bytes {
         return Err(format!(
-            "Not enough storage: need ~{} MB, only {} MB free",
-            required_with_margin / 1_048_576,
-            storage.free_bytes / 1_048_576
+            "Not enough storage: need ~{:.2} GB, only {:.2} GB free",
+            required_kb / 1_048_576.0,
+            storage.free_bytes as f64 / 1_048_576.0
         ));
     }
 
@@ -511,7 +521,8 @@ fn do_upload(
 
 // ── Storage query ────────────────────────────────────────────────────────────
 //
-// CTRL/0x02 → {"size":"<total>","free":"<free>"}  (both values are byte counts as strings)
+// CTRL/0x02 → device responds with json {"size":"<kb>","free":"<kb>"}
+// Both values are kilobyte counts reported as strings.
 
 fn do_get_storage(
     handle: &rusb::DeviceHandle<rusb::Context>,
@@ -523,7 +534,6 @@ fn do_get_storage(
         .map_err(|e| format!("storage query failed: {}", e))?;
     let resp = read_response(handle, ep_in, timeout)?;
 
-    // Response: [02 00 05 02] + json payload
     if resp.len() < 5 {
         return Err(format!("storage response too short: {:02x?}", resp));
     }
@@ -536,6 +546,7 @@ fn do_get_storage(
     let v: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| format!("storage JSON parse failed: {}", e))?;
 
+    // Device reports in kilobytes
     let total = v["size"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
     let free  = v["free"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
     let used  = total.saturating_sub(free);
@@ -597,6 +608,79 @@ fn do_list_tracks(
 // DELETE_TRACK = control subtype 0x0A  {"album":"A1","track":"T3"}
 // Both follow the standard MSG_CONTROL framing and return an ACK.
 
+/// Exact post-delete sync sequence observed in official website. 
+/// After a delete the official app does a complete read
+/// of every album-config + every track-config for every album, ending with
+/// RECORD/T1. The device uses this full pass to rebuild its internal state and
+/// pick the correct active track on USB disconnect.
+
+fn do_post_delete_sync(
+    handle: &rusb::DeviceHandle<rusb::Context>,
+    ep_out: u8,
+    ep_in: u8,
+    timeout: Duration,
+) -> Result<(), String> {
+    // Fresh listing after delete
+    let listing_pkt = do_ping(handle, ep_out, ep_in, timeout)?;
+    let listing = parse_track_listing(&listing_pkt);
+
+    // Read every non-RECORD album fully, then RECORD last
+    let mut record_tracks: Option<Vec<String>> = None;
+    for (album_id, track_ids) in &listing {
+        if album_id == RECORD_ALBUM {
+            record_tracks = Some(track_ids.clone());
+            continue;
+        }
+        eprintln!("[post-delete sync] album {}", album_id);
+        // album-config — non-fatal so the loop always reaches the last album/track
+        if let Err(e) = read_device_file(handle, ep_out, ep_in,
+            build_message(MSG_CONTROL, &{
+                let j = format!("{{\"album\":\"{}\"}}", album_id);
+                let mut p = vec![CTRL_REQUEST_ALBUM];
+                p.extend_from_slice(j.as_bytes()); p.push(0x00); p
+            }), timeout) {
+            eprintln!("[post-delete sync] WARN album-config {} failed: {}", album_id, e);
+        }
+        // all track-configs — also non-fatal
+        for track_id in track_ids {
+            if let Err(e) = read_device_file(handle, ep_out, ep_in,
+                build_message(MSG_CONTROL, &{
+                    let j = format!("{{\"album\":\"{}\",\"track\":\"{}\"}}", album_id, track_id);
+                    let mut p = vec![CTRL_REQUEST_TRACK];
+                    p.extend_from_slice(j.as_bytes()); p.push(0x00); p
+                }), timeout) {
+                eprintln!("[post-delete sync] WARN track-config {}/{} failed: {}", album_id, track_id, e);
+            }
+        }
+    }
+
+    // RECORD: REQ_ALBUM returns 0x01 (not a file), then REQ_TRACK RECORD/T1 as normal file
+    if let Some(record_tracks) = record_tracks {
+        eprintln!("[post-delete sync] RECORD album");
+        handle.write_bulk(ep_out, &build_message(MSG_CONTROL, &{
+            let j = format!("{{\"album\":\"{}\"}}", RECORD_ALBUM);
+            let mut p = vec![CTRL_REQUEST_ALBUM];
+            p.extend_from_slice(j.as_bytes()); p.push(0x00); p
+        }), timeout).map_err(|e| format!("RECORD req failed: {}", e))?;
+        // Consume the 0x01 response (not a file stream)
+        let _ = read_response(handle, ep_in, timeout)?;
+
+        // Read each RECORD track (usually just T1)
+        for track_id in &record_tracks {
+            eprintln!("[post-delete sync] RECORD/{}", track_id);
+            let _ = read_device_file(handle, ep_out, ep_in,
+                build_message(MSG_CONTROL, &{
+                    let j = format!("{{\"album\":\"{}\",\"track\":\"{}\"}}", RECORD_ALBUM, track_id);
+                    let mut p = vec![CTRL_REQUEST_TRACK];
+                    p.extend_from_slice(j.as_bytes()); p.push(0x00); p
+                }), timeout);
+        }
+    }
+
+    eprintln!("[post-delete sync] complete");
+    Ok(())
+}
+
 fn do_delete(
     handle: &rusb::DeviceHandle<rusb::Context>,
     ep_out: u8,
@@ -612,13 +696,19 @@ fn do_delete(
     handle.write_bulk(ep_out, &build_message(MSG_CONTROL, &payload), timeout)
         .map_err(|e| format!("DELETE write failed: {}", e))?;
 
-    // Device responds with MSG_CONTROL + ctrl_byte, not a plain ACK
+    // Device responds with STATUS [02 00 05 <ctrl_byte>]
     let resp = read_response(handle, ep_in, timeout)?;
-    if resp.len() >= 3 && resp[2] == MSG_CONTROL && resp.get(3) == Some(&ctrl_byte) {
-        Ok(())
-    } else {
-        Err(format!("Unexpected delete response: {:02x?}", &resp[..resp.len().min(8)]))
+    if resp.len() < 4 || resp[2] != 0x05 || resp[3] != ctrl_byte {
+        return Err(format!("Unexpected delete response: {:02x?}", &resp[..resp.len().min(8)]));
     }
+
+    // ── Full sync read (matches official website post-delete behaviour) ───────────
+    // The official website does a complete read of every album + every track after
+    // delete (including RECORD/T1 last).
+    eprintln!("[delete] Starting post-delete full sync read...");
+    do_post_delete_sync(handle, ep_out, ep_in, timeout)?;
+
+    Ok(())
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
@@ -737,6 +827,54 @@ pub fn connect_usb_device(
     let listing = parse_track_listing(&listing_pkt);
     eprintln!("[connect] {} album(s) on device", listing.len());
 
+    // ── Connect-time full sync ────────────────────────────────────────────────
+    // The official website reads every album-config + track-config (including RECORD)
+    // at connect time. The device needs this full pass to establish its internal
+    // state so that subsequent delete operations work correctly.
+    eprintln!("[connect] Running connect-time full sync...");
+    let mut record_tracks_connect: Option<Vec<String>> = None;
+    for (album_id, track_ids) in &listing {
+        if album_id == RECORD_ALBUM {
+            record_tracks_connect = Some(track_ids.clone());
+            continue;
+        }
+        if let Err(e) = read_device_file(&handle, ep_out, ep_in,
+            build_message(MSG_CONTROL, &{
+                let j = format!("{{\"album\":\"{}\"}}", album_id);
+                let mut p = vec![CTRL_REQUEST_ALBUM];
+                p.extend_from_slice(j.as_bytes()); p.push(0x00); p
+            }), timeout) {
+            eprintln!("[connect] WARN album-config {} failed: {}", album_id, e);
+        }
+        for track_id in track_ids {
+            if let Err(e) = read_device_file(&handle, ep_out, ep_in,
+                build_message(MSG_CONTROL, &{
+                    let j = format!("{{\"album\":\"{}\",\"track\":\"{}\"}}", album_id, track_id);
+                    let mut p = vec![CTRL_REQUEST_TRACK];
+                    p.extend_from_slice(j.as_bytes()); p.push(0x00); p
+                }), timeout) {
+                eprintln!("[connect] WARN track-config {}/{} failed: {}", album_id, track_id, e);
+            }
+        }
+    }
+    if let Some(record_tracks) = record_tracks_connect {
+        handle.write_bulk(ep_out, &build_message(MSG_CONTROL, &{
+            let j = format!("{{\"album\":\"{}\"}}", RECORD_ALBUM);
+            let mut p = vec![CTRL_REQUEST_ALBUM];
+            p.extend_from_slice(j.as_bytes()); p.push(0x00); p
+        }), timeout).ok();
+        let _ = read_response(&handle, ep_in, timeout);
+        for track_id in &record_tracks {
+            let _ = read_device_file(&handle, ep_out, ep_in,
+                build_message(MSG_CONTROL, &{
+                    let j = format!("{{\"album\":\"{}\",\"track\":\"{}\"}}", RECORD_ALBUM, track_id);
+                    let mut p = vec![CTRL_REQUEST_TRACK];
+                    p.extend_from_slice(j.as_bytes()); p.push(0x00); p
+                }), timeout);
+        }
+    }
+    eprintln!("[connect] Connect-time sync complete");
+
     *state.0.lock().unwrap() = Some(handle);
     Ok("Connected".to_string())
 }
@@ -770,9 +908,16 @@ pub async fn upload_stems(
         .take()
         .ok_or("Device not connected")?;
 
-    task::spawn_blocking(move || do_upload(handle, 0x01, 0x81, resolved_name, stem_data))
-        .await
-        .map_err(|e| format!("Upload task panicked: {}", e))?
+    // do_upload always returns the handle (even on error) so we can restore it,
+    // keeping the device connected regardless of whether the upload succeeded.
+    let (returned_handle, result) = task::spawn_blocking(move || {
+        do_upload(handle, 0x01, 0x81, resolved_name, stem_data)
+    })
+    .await
+    .map_err(|e| format!("Upload task panicked: {}", e))?;
+
+    *state.0.lock().map_err(|_| "Mutex poisoned".to_string())? = Some(returned_handle);
+    result
 }
 
 /// Returns all albums and their tracks with human-readable titles read from
@@ -811,7 +956,7 @@ pub fn delete_album(
     do_delete(handle, 0x01, 0x81, CTRL_DELETE_ALBUM, &json)
 }
 
-/// Query device storage (total, used, free bytes).
+/// Query device storage (values are in kilobytes as reported by device).
 #[tauri::command]
 pub fn get_storage_info(
     state: tauri::State<'_, DeviceState>,
