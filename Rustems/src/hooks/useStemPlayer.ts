@@ -47,10 +47,6 @@ export function useStemPlayer() {
   return { loadSong, play, pause, setStemVolume, printStatus }
 }
 
-export async function getUSBDevices(): Promise<string[]> {
-  return await invoke<string[]>("list_usb_devices")
-}
-
 export async function listDeviceTracks(): Promise<AlbumInfo[]> {
   return await invoke<AlbumInfo[]>("list_device_tracks")
 }
