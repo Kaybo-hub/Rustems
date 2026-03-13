@@ -17,7 +17,7 @@ use rubato::{FftFixedIn, Resampler};
 pub struct SplitResult {
     pub output_dir: String,
     pub track_name: String,
-    pub stems: Vec<String>, // in order [vocals, drums, bass, melody].
+    pub stems: Vec<String>, // in order of [vocals, drums, bass, melody].
 }
 
 // ── Audio normalisation ───────────────────────────────────────────────────────
@@ -438,4 +438,30 @@ pub async fn split_stems(input_path: String) -> Result<SplitResult, String> {
         track_name,
         stems: stem_files,
     })
+}
+
+/// Copy the split stems (MP3s) to a user-chosen export directory.
+/// `stems` is the `SplitResult.stems` vec — absolute paths to the MP3 files.
+/// `dest_dir` is the folder the user picked via the dialog.
+#[tauri::command]
+pub async fn export_stems(stems: Vec<String>, dest_dir: String) -> Result<Vec<String>, String> {
+    let dest = std::path::Path::new(&dest_dir);
+    std::fs::create_dir_all(dest)
+        .map_err(|e| format!("Could not create destination folder: {}", e))?;
+
+    let mut exported: Vec<String> = Vec::new();
+
+    for src_str in &stems {
+        let src = std::path::Path::new(src_str);
+        let file_name = src
+            .file_name()
+            .ok_or_else(|| format!("Invalid stem path: {}", src_str))?;
+        let dst = dest.join(file_name);
+        std::fs::copy(src, &dst)
+            .map_err(|e| format!("Failed to copy '{}': {}", src_str, e))?;
+        exported.push(dst.to_string_lossy().to_string());
+    }
+
+    eprintln!("[export_stems] Exported {} stem(s) to '{}'", exported.len(), dest_dir);
+    Ok(exported)
 }

@@ -32,7 +32,8 @@ pub fn run() {
             stem_player::disconnect_device,
             stem_player::get_storage_info,
             stem_splitter::check_splitter,
-            stem_splitter::split_stems
+            stem_splitter::split_stems,
+            stem_splitter::export_stems
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

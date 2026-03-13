@@ -289,6 +289,30 @@ export default function App() {
     }
   }
 
+  const handleExportStems = async () => {
+    if (!splitResult) return
+
+    const dest = await open({
+      title: "Choose export folder",
+      directory: true,
+      multiple: false,
+    })
+    if (!dest || typeof dest !== "string") return
+
+    try {
+      const exported = await invoke<string[]>("export_stems", {
+        stems: splitResult.stems,
+        destDir: dest,
+      })
+      await message(
+        `Exported ${exported.length} stem(s) to:\n${dest}`,
+        { title: "Export complete", kind: "info" }
+      )
+    } catch (err) {
+      await message(`Export failed: ${err}`, { title: "Error", kind: "error" })
+    }
+  }
+
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
@@ -365,8 +389,8 @@ export default function App() {
         )}
 
         <p style={{ fontSize: 12, color: "#666", margin: "0 0 12px" }}>
-          Split any song into 4 stems locally — no internet required.
-          CPU splitting takes 1–3 min per track. GPU (CUDA/CoreML/DirectML) is used automatically if available.
+          Split any song into 4 stems locally.
+          CPU splitting takes 1-3 min per track. GPU is used automatically if available.
         </p>
 
         <button
@@ -393,22 +417,6 @@ export default function App() {
           }}>
             <div style={{ fontSize: 13, color: "#5d5", marginBottom: 8, fontWeight: 600 }}>
               ✓ Split complete
-            </div>
-
-            {/* Stem chips */}
-            <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-              {["Vocals", "Drums", "Bass", "Melody"].map((label) => (
-                <div key={label} style={{
-                  background: "linear-gradient(135deg, #1a3a1a, #0f2a0f)",
-                  borderRadius: 6,
-                  padding: "6px 14px",
-                  fontSize: 12,
-                  border: "1px solid #3a6a3a",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-                }}>
-                  <span style={{ color: "#a0f0a0", fontWeight: 700, fontFamily: "'Georgia', serif", letterSpacing: "0.05em" }}>{label}</span>
-                </div>
-              ))}
             </div>
 
             {/* Preview */}
@@ -444,6 +452,18 @@ export default function App() {
                 }}
               >
                 {uploading ? "Uploading…" : "Upload to device"}
+              </button>
+
+              <button
+                onClick={handleExportStems}
+                style={{
+                  background: "#151525",
+                  color: "#88aaff",
+                  border: "1px solid #2a2a4a",
+                  cursor: "pointer",
+                }}
+              >
+                Export to folder…
               </button>
               {!connected && (
                 <span style={{ fontSize: 11, color: "#555" }}>Connect a device first</span>
@@ -551,7 +571,7 @@ export default function App() {
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function SplitterBadge({
-  status, detail
+  status
 }: { status: "unknown" | "checking" | "ok" | "missing"; detail: string }) {
   const cfg = {
     unknown:  { bg: "#1a1a1a", color: "#555",  border: "#333",   dot: "●" },

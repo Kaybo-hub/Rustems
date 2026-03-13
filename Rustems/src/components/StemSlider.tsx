@@ -40,7 +40,7 @@ export default function StemSlider({ stem, onValueChange }: Props) {
           cursor: "pointer",
         }}
       />
-      <span style={{ marginTop: "10px", fontSize: "12px", fontWeight: "bold" }}>
+      <span style={{ marginTop: "10px", fontSize: "12px", fontWeight: "bold", color: "#aaa" }}>
         {stem.toUpperCase()}
       </span>
     </div>

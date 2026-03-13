@@ -30,7 +30,7 @@ rusb = "0.9.4"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["clock"] }
 rand = "0.10.0"
-stem-splitter-core = { git = "https://github.com/Kaybo-hub/stem-splitter-core", features = ["cuda"] }
+stem-splitter-core = { git = "https://github.com/Kaybo-hub/stem-splitter-core", features = ["directml"] }
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "ogg", "aac", "mkv"] }
 hound = "3.5.1"
 rubato = "0.12.0"
