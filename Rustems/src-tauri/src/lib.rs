@@ -3,15 +3,14 @@
 
 mod audio;
 mod cmd;
-mod stem_player;
-mod stem_splitter;
+mod usb;
+mod splitter;
 
 use audio::StemEngine;
-use stem_player::DeviceState;
+use usb::DeviceState;
 use std::sync::Mutex;
 use tauri::Manager;
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -23,17 +22,17 @@ pub fn run() {
             cmd::pause,
             cmd::set_stem_volume,
             cmd::print_audio_status,
-            stem_player::list_usb_devices,
-            stem_player::connect_usb_device,
-            stem_player::upload_stems,
-            stem_player::list_device_tracks,
-            stem_player::delete_track,
-            stem_player::delete_album,
-            stem_player::disconnect_device,
-            stem_player::get_storage_info,
-            stem_splitter::check_splitter,
-            stem_splitter::split_stems,
-            stem_splitter::export_stems
+            usb::list_usb_devices,
+            usb::connect_usb_device,
+            usb::upload_stems,
+            usb::list_device_tracks,
+            usb::delete_track,
+            usb::delete_album,
+            usb::disconnect_device,
+            usb::get_storage_info,
+            splitter::check_splitter,
+            splitter::split_stems,
+            splitter::export_stems
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -43,7 +42,7 @@ pub fn run() {
                     let state = app_handle.state::<DeviceState>();
                     let mut guard = state.0.lock().unwrap();
                     if let Some(handle) = guard.take() {
-                        crate::stem_player::do_disconnect(handle);
+                        crate::usb::do_disconnect(handle);
                     }
                 }
                 _ => {}

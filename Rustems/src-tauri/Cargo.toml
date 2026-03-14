@@ -1,9 +1,9 @@
 [package]
-name = "rustems"
-version = "0.1.0"
-description = "A Tauri App"
+name = "Rustems"
+version = "1.0.0"
+description = "A desktop app for splitting any song into stems and uploading them to a compatible Kano Stem Player"
 authors = ["you"]
-edition = "2021"
+edition = "2026"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
