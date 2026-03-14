@@ -1,6 +1,6 @@
 [package]
 name = "Rustems"
-version = "1.0.0"
+version = "0.1.0"
 description = "A desktop app for splitting any song into stems and uploading them to a compatible Kano Stem Player"
 authors = ["you"]
 edition = "2021"

@@ -39,6 +39,7 @@ After splitting, you can preview the stems with per-stem volume sliders, export 
 - [Rust](https://rustup.rs) (stable, 1.77+)
 - [Node.js](https://nodejs.org) (18+) and npm
 - [Tauri prerequisites](https://tauri.app/start/prerequisites/) for Windows (WebView2)
+- [Latest Visual Studio Community 2022/2026](https://visualstudio.microsoft.com/insiders/)
 
 ### Windows
 
@@ -52,7 +53,7 @@ No driver installation was needed during development. If the app fails to detect
 # Install frontend dependencies
 npm install
 
-# Run in development mode (hot-reload)
+# Run in development mode
 npm run tauri dev
 
 # Build a release binary for your platform
@@ -63,9 +64,9 @@ npm run tauri build
 
 ## First run
 
-On first use of the stem splitter, the app will automatically download the `htdemucs_ort_v1` model (~100 MB) to your system's app data directory. This only happens once. The model is not bundled with the app binary.
+On first use of the stem splitter, the app will automatically download the `htdemucs_ort_v1` model (~200 MB) to your system's app data directory. This should only happens once. 
 
-The model is stored at `%APPDATA%\rustems\`.
+The model is stored at `AppData\Local\StemSplitter\stem-splitter-core\cache\models`.
 
 ---
 
@@ -75,7 +76,7 @@ The model is stored at `%APPDATA%\rustems\`.
 
 1. Launch Rustems. The Stem Splitter panel will show **Ready** once the model is available.
 2. Click **Pick file & split** and select an audio file.
-3. Wait for splitting to complete (progress is shown; CPU splitting takes 1–3 min).
+3. Wait for splitting to complete (progress is shown; CPU splitting takes 2–5 mins).
 4. Use the stem sliders and play/pause buttons to preview the result.
 5. Optionally edit the track name.
 6. Click **Export to folder…** to save the MP3s locally, or **Upload to device** to push them to a connected stem player.
